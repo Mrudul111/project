@@ -1,6 +1,38 @@
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'package:path/path.dart';
+import 'package:sqflite/sqflite.dart';
+class DatabaseHelper {
+  late Database _database;
+
+  Future<void> initializeDatabase() async {
+    final databasesPath = await getDatabasesPath();
+    final path = join(databasesPath, 'your_database.db');
+
+    _database = await openDatabase(path, version: 1,
+        onCreate: (Database db, int version) async {
+          await db.execute('CREATE TABLE IF NOT EXISTS blogs (title TEXT, image_url TEXT)');
+        });
+  }
+
+  Future<void> insertBlog(Map<String, dynamic> blog) async {
+    final Map<String, dynamic> blogData = {
+      'title': blog['title'],
+      'image_url': blog['image_url'],
+
+    };
+
+    await _database.insert('blogs', blogData,conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+
+  Future<List<Map<String, dynamic>>> getBlogs() async {
+    return await _database.query('blogs');
+  }
+}
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -10,10 +42,25 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  final DatabaseHelper _databaseHelper = DatabaseHelper();
   @override
   void initState() {
     // TODO: implement initState
     super.initState();
+    _initializeData();
+  }
+  Future<void> _initializeData() async {
+    await _databaseHelper.initializeDatabase();
+    final offlineData = await _databaseHelper.getBlogs();
+
+    if (offlineData.isEmpty) {
+      final onlineData = await fetchBlogs();
+      onlineData['blogs'].forEach((blog) {
+        _databaseHelper.insertBlog(blog);
+      });
+    }
+
+    setState(() {});
   }
   Map<String,dynamic> list = {};
   Future<Map<String, dynamic>> fetchBlogs() async {
@@ -26,16 +73,34 @@ class _HomePageState extends State<HomePage> {
       });
 
       if (response.statusCode == 200) {
-        print(response.body);
-        return jsonDecode(response.body);
-      } else {
+        final onlineData = jsonDecode(response.body);
 
-        throw Exception('request failed: ${response.statusCode}');
+        onlineData['blogs'].forEach((blog) {
+          _databaseHelper.insertBlog(blog);
+        });
+        return onlineData;
+      } else {
+        final offlineData = await _databaseHelper.getBlogs();
+        if (offlineData.isNotEmpty) {
+          return {'blogs': offlineData};
+        } else {
+          throw Exception('Network request failed, and no offline data available.');
+        }
       }
     } catch (e) {
-      throw Exception('error: $e');
+      final offlineData = await _databaseHelper.getBlogs();
+      if (offlineData.isNotEmpty) {
+        return {'blogs': offlineData};
+      } else {
+        throw Exception('Error: $e, and no offline data available.');
+      }
     }
   }
+
+
+
+
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -52,31 +117,32 @@ class _HomePageState extends State<HomePage> {
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Container(
-          child: FutureBuilder(
-            future: fetchBlogs(),
-            builder: (context, snapshot) {
-              if (snapshot.connectionState == ConnectionState.waiting) {
-                return Center(child: CircularProgressIndicator());
-              } else if (snapshot.hasError) {
-                return Center(child: Text('Error: ${snapshot.error}'));
-              } else if (!snapshot.hasData || (snapshot.data?['blogs'] as List<dynamic>?) == null) {
-                return Center(child: Text('No data available.'));
-              } else {
-                final blogList = snapshot.data?['blogs'] as List<dynamic>;
-                return ListView.separated(
-                  scrollDirection: Axis.vertical,
-                  separatorBuilder: (context, index) => SizedBox(height: 16.0),
-                  shrinkWrap: true,
-                  itemCount: blogList.length,
-                  physics: AlwaysScrollableScrollPhysics(),
-                  itemBuilder: (context, index) {
-                    final blog = blogList[index];
-                    return entry(blog: blog);
-                  },
-                );
-              }
-            },
-          )
+            child: FutureBuilder(
+              future: fetchBlogs(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return Center(child: CircularProgressIndicator());
+                } else if (snapshot.hasError) {
+                  print(snapshot.error);
+                  return Center(child: Text('${snapshot.error}'));
+                } else if (!snapshot.hasData || (snapshot.data?['blogs'] as List<dynamic>?) == null) {
+                  return Center(child: Text('No data available.'));
+                } else {
+                  final blogList = snapshot.data?['blogs'] as List<dynamic>;
+                  return ListView.separated(
+                    scrollDirection: Axis.vertical,
+                    separatorBuilder: (context, index) => SizedBox(height: 16.0),
+                    shrinkWrap: true,
+                    itemCount: blogList.length,
+                    physics: AlwaysScrollableScrollPhysics(),
+                    itemBuilder: (context, index) {
+                      final blog = blogList[index];
+                      return entry(blog: blog);
+                    },
+                  );
+                }
+              },
+            )
 
         ),
       ),
@@ -85,8 +151,8 @@ class _HomePageState extends State<HomePage> {
 }
 
 class entry extends StatefulWidget {
-final dynamic blog;
-entry({required this.blog});
+  final dynamic blog;
+  entry({required this.blog});
   @override
   State<entry> createState() => _entryState();
 }
@@ -115,7 +181,14 @@ class _entryState extends State<entry> {
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(15),
                     ),
-                    child: Image.network(widget.blog['image_url'],fit: BoxFit.cover,),
+                    child: CachedNetworkImage(
+                      imageUrl: widget.blog['image_url'],
+                      placeholder: (context, url) => Container(),
+                      errorWidget: (context, url, error) => Container(),
+                      fit: BoxFit.cover,
+                      cacheManager: DefaultCacheManager(),
+
+                    ),
                   ),
                   GestureDetector(
                     onTap: (){
@@ -147,7 +220,7 @@ class _entryState extends State<entry> {
 page(id, title, url) {
   return Scaffold(
     appBar: AppBar(
-      title: Text(id,overflow: TextOverflow.ellipsis,),
+
     ),
     body: Padding(
       padding: EdgeInsets.symmetric(vertical: 10),
@@ -158,7 +231,14 @@ page(id, title, url) {
             Container(
               width: double.infinity,
               height: 400,
-              child: Image.network(url,fit: BoxFit.fitWidth,),
+              child: CachedNetworkImage(
+                imageUrl: url,
+                placeholder: (context, url) => Container(),
+                errorWidget: (context, url, error) => Container(),
+                fit: BoxFit.cover,
+                cacheManager: DefaultCacheManager(),
+
+              ),
             ),
             Text(title)
           ],
