@@ -2,6 +2,9 @@
 
 Project App
 
+This app works in both offline as well as online mode.
+
+
 ## Getting Started
 
 get the apk here
